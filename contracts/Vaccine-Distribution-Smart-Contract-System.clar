@@ -6,6 +6,10 @@
 (define-constant ERR_VACCINE_ALREADY_USED (err u104))
 (define-constant ERR_INVALID_STATUS (err u105))
 (define-constant ERR_FACILITY_NOT_AUTHORIZED (err u106))
+(define-constant ERR_BATCH_ALREADY_RECALLED (err u107))
+(define-constant ERR_BATCH_NOT_RECALLED (err u108))
+
+(define-data-var next-recall-id uint u1)
 
 (define-data-var next-vaccine-id uint u1)
 (define-data-var next-batch-id uint u1)
@@ -296,6 +300,91 @@
         cold-chain-violations: (get cold-chain-violations vaccine)
       })
       ERR_VACCINE_NOT_FOUND
+    )
+  )
+)
+
+(define-map batch-recalls
+  { batch-id: uint }
+  {
+    recall-id: uint,
+    recalled-by: principal,
+    recall-date: uint,
+    reason: (string-ascii 200),
+    severity: (string-ascii 20),
+    active: bool
+  }
+)
+
+(define-map recall-registry
+  { recall-id: uint }
+  {
+    batch-id: uint,
+    recalled-by: principal,
+    recall-date: uint,
+    reason: (string-ascii 200),
+    severity: (string-ascii 20),
+    affected-vaccines: uint,
+    administered-count: uint
+  }
+)
+
+(define-public (issue-batch-recall (batch-id uint) (reason (string-ascii 200)) (severity (string-ascii 20)))
+  (let
+    (
+      (recall-id (var-get next-recall-id))
+      (batch-data (map-get? batches { batch-id: batch-id }))
+      (facility-perms (map-get? facility-permissions { facility: tx-sender }))
+      (existing-recall (map-get? batch-recalls { batch-id: batch-id }))
+    )
+    (asserts! (is-some batch-data) ERR_VACCINE_NOT_FOUND)
+    (asserts! (is-some facility-perms) ERR_FACILITY_NOT_AUTHORIZED)
+    (asserts! (get can-manufacture (unwrap-panic facility-perms)) ERR_UNAUTHORIZED)
+    (asserts! (is-none existing-recall) ERR_BATCH_ALREADY_RECALLED)
+    (map-set batch-recalls
+      { batch-id: batch-id }
+      {
+        recall-id: recall-id,
+        recalled-by: tx-sender,
+        recall-date: stacks-block-height,
+        reason: reason,
+        severity: severity,
+        active: true
+      }
+    )
+    (map-set recall-registry
+      { recall-id: recall-id }
+      {
+        batch-id: batch-id,
+        recalled-by: tx-sender,
+        recall-date: stacks-block-height,
+        reason: reason,
+        severity: severity,
+        affected-vaccines: u0,
+        administered-count: u0
+      }
+    )
+    (var-set next-recall-id (+ recall-id u1))
+    (ok recall-id)
+  )
+)
+
+(define-read-only (get-batch-recall-status (batch-id uint))
+  (map-get? batch-recalls { batch-id: batch-id })
+)
+
+(define-read-only (get-recall-info (recall-id uint))
+  (map-get? recall-registry { recall-id: recall-id })
+)
+
+(define-read-only (is-vaccine-recalled (vaccine-id uint))
+  (let
+    (
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+    )
+    (match vaccine-data
+      vaccine (is-some (map-get? batch-recalls { batch-id: (get batch-id vaccine) }))
+      false
     )
   )
 )
