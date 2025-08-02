@@ -388,3 +388,117 @@
     )
   )
 )
+
+(define-constant ERR_ALERT_ALREADY_EXISTS (err u109))
+(define-constant ERR_ALERT_NOT_FOUND (err u110))
+(define-constant ERR_INVALID_THRESHOLD (err u111))
+
+(define-data-var next-alert-id uint u1)
+
+(define-map expiration-alerts
+  { alert-id: uint }
+  {
+    vaccine-id: uint,
+    batch-id: uint,
+    expiry-date: uint,
+    alert-level: (string-ascii 20),
+    threshold-blocks: uint,
+    created-at: uint,
+    acknowledged: bool,
+    current-facility: principal
+  }
+)
+
+(define-map alert-thresholds
+  { level: (string-ascii 20) }
+  { blocks-before-expiry: uint, description: (string-ascii 100) }
+)
+
+(define-public (set-alert-threshold (level (string-ascii 20)) (blocks-before-expiry uint) (description (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> blocks-before-expiry u0) ERR_INVALID_THRESHOLD)
+    (map-set alert-thresholds
+      { level: level }
+      { blocks-before-expiry: blocks-before-expiry, description: description }
+    )
+    (ok true)
+  )
+)
+
+(define-public (check-vaccine-expiration (vaccine-id uint))
+  (let
+    (
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+      (current-block stacks-block-height)
+    )
+    (asserts! (is-some vaccine-data) ERR_VACCINE_NOT_FOUND)
+    (let
+      (
+        (vaccine (unwrap-panic vaccine-data))
+        (expiry-date (get expiry-date vaccine))
+        (blocks-until-expiry (- expiry-date current-block))
+      )
+      (if (and (<= blocks-until-expiry u1000) (not (is-eq (get status vaccine) "administered")))
+        (create-expiration-alert vaccine-id vaccine blocks-until-expiry)
+        (ok u0)
+      )
+    )
+  )
+)
+
+(define-private (create-expiration-alert (vaccine-id uint) (vaccine-data { batch-id: uint, manufacturer: principal, vaccine-type: (string-ascii 50), production-date: uint, expiry-date: uint, current-temperature: int, min-temp: int, max-temp: int, current-location: (string-ascii 100), status: (string-ascii 20), administered-to: (optional principal), administered-date: (optional uint), cold-chain-violations: uint }) (blocks-until-expiry uint))
+  (let
+    (
+      (alert-id (var-get next-alert-id))
+      (alert-level (determine-alert-level blocks-until-expiry))
+    )
+    (map-set expiration-alerts
+      { alert-id: alert-id }
+      {
+        vaccine-id: vaccine-id,
+        batch-id: (get batch-id vaccine-data),
+        expiry-date: (get expiry-date vaccine-data),
+        alert-level: alert-level,
+        threshold-blocks: blocks-until-expiry,
+        created-at: stacks-block-height,
+        acknowledged: false,
+        current-facility: (get manufacturer vaccine-data)
+      }
+    )
+    (var-set next-alert-id (+ alert-id u1))
+    (ok alert-id)
+  )
+)
+
+(define-private (determine-alert-level (blocks-until-expiry uint))
+  (if (<= blocks-until-expiry u144)
+    "critical"
+    (if (<= blocks-until-expiry u720)
+      "warning"
+      "notice"
+    )
+  )
+)
+
+(define-public (acknowledge-alert (alert-id uint))
+  (let
+    (
+      (alert-data (map-get? expiration-alerts { alert-id: alert-id }))
+    )
+    (asserts! (is-some alert-data) ERR_ALERT_NOT_FOUND)
+    (map-set expiration-alerts
+      { alert-id: alert-id }
+      (merge (unwrap-panic alert-data) { acknowledged: true })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-expiration-alert (alert-id uint))
+  (map-get? expiration-alerts { alert-id: alert-id })
+)
+
+(define-read-only (get-alert-threshold (level (string-ascii 20)))
+  (map-get? alert-thresholds { level: level })
+)
