@@ -502,3 +502,104 @@
 (define-read-only (get-alert-threshold (level (string-ascii 20)))
   (map-get? alert-thresholds { level: level })
 )
+
+(define-constant ERR_INVALID_EMISSION_DATA (err u112))
+(define-constant ERR_CARBON_REPORT_NOT_FOUND (err u113))
+
+(define-data-var next-carbon-report-id uint u1)
+
+(define-map carbon-emission-factors
+  { activity-type: (string-ascii 30) }
+  { 
+    co2-per-unit: uint,
+    unit-description: (string-ascii 50)
+  }
+)
+
+(define-map vaccine-carbon-footprint
+  { vaccine-id: uint }
+  {
+    total-emissions: uint,
+    transport-emissions: uint,
+    storage-emissions: uint,
+    refrigeration-emissions: uint,
+    last-updated: uint
+  }
+)
+
+(define-map carbon-activity-log
+  { vaccine-id: uint, activity-id: uint }
+  {
+    activity-type: (string-ascii 30),
+    distance-km: uint,
+    duration-hours: uint,
+    emissions-generated: uint,
+    facility: principal,
+    timestamp: uint
+  }
+)
+
+(define-public (initialize-emission-factors)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set carbon-emission-factors { activity-type: "transport-truck" } { co2-per-unit: u162, unit-description: "grams CO2 per km" })
+    (map-set carbon-emission-factors { activity-type: "transport-air" } { co2-per-unit: u500, unit-description: "grams CO2 per km" })
+    (map-set carbon-emission-factors { activity-type: "cold-storage" } { co2-per-unit: u45, unit-description: "grams CO2 per hour" })
+    (map-set carbon-emission-factors { activity-type: "ultra-cold" } { co2-per-unit: u120, unit-description: "grams CO2 per hour" })
+    (ok true)
+  )
+)
+
+(define-public (track-carbon-activity (vaccine-id uint) (activity-type (string-ascii 30)) (distance-km uint) (duration-hours uint))
+  (let
+    (
+      (activity-id (var-get next-carbon-report-id))
+      (emission-factor (map-get? carbon-emission-factors { activity-type: activity-type }))
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+      (current-footprint (default-to { total-emissions: u0, transport-emissions: u0, storage-emissions: u0, refrigeration-emissions: u0, last-updated: u0 }
+                                     (map-get? vaccine-carbon-footprint { vaccine-id: vaccine-id })))
+    )
+    (asserts! (is-some vaccine-data) ERR_VACCINE_NOT_FOUND)
+    (asserts! (is-some emission-factor) ERR_INVALID_EMISSION_DATA)
+    (let
+      (
+        (factor (unwrap-panic emission-factor))
+        (emissions (if (> distance-km u0) 
+                     (* distance-km (get co2-per-unit factor))
+                     (* duration-hours (get co2-per-unit factor))))
+        (activity-category (if (is-eq activity-type "transport-truck") "transport"
+                             (if (is-eq activity-type "transport-air") "transport" "storage")))
+      )
+      (map-set carbon-activity-log
+        { vaccine-id: vaccine-id, activity-id: activity-id }
+        {
+          activity-type: activity-type,
+          distance-km: distance-km,
+          duration-hours: duration-hours,
+          emissions-generated: emissions,
+          facility: tx-sender,
+          timestamp: stacks-block-height
+        }
+      )
+      (map-set vaccine-carbon-footprint
+        { vaccine-id: vaccine-id }
+        {
+          total-emissions: (+ (get total-emissions current-footprint) emissions),
+          transport-emissions: (+ (get transport-emissions current-footprint) 
+                                  (if (is-eq activity-category "transport") emissions u0)),
+          storage-emissions: (+ (get storage-emissions current-footprint) 
+                                (if (is-eq activity-category "storage") emissions u0)),
+          refrigeration-emissions: (+ (get refrigeration-emissions current-footprint)
+                                     (if (is-eq activity-type "ultra-cold") emissions u0)),
+          last-updated: stacks-block-height
+        }
+      )
+      (var-set next-carbon-report-id (+ activity-id u1))
+      (ok activity-id)
+    )
+  )
+)
+
+(define-read-only (get-vaccine-carbon-footprint (vaccine-id uint))
+  (map-get? vaccine-carbon-footprint { vaccine-id: vaccine-id })
+)
