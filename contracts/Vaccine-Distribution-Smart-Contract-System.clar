@@ -9,6 +9,13 @@
 (define-constant ERR_BATCH_ALREADY_RECALLED (err u107))
 (define-constant ERR_BATCH_NOT_RECALLED (err u108))
 
+
+(define-constant ERR_DONATION_NOT_FOUND (err u114))
+(define-constant ERR_INSUFFICIENT_DONATED_VACCINES (err u115))
+(define-constant ERR_NOT_ELIGIBLE_FOR_DONATION (err u116))
+
+(define-data-var next-donation-id uint u1)
+
 (define-data-var next-recall-id uint u1)
 
 (define-data-var next-vaccine-id uint u1)
@@ -602,4 +609,84 @@
 
 (define-read-only (get-vaccine-carbon-footprint (vaccine-id uint))
   (map-get? vaccine-carbon-footprint { vaccine-id: vaccine-id })
+)
+
+(define-map donation-pools
+  { pool-id: uint }
+  {
+    donor: principal,
+    target-region: (string-ascii 100),
+    available-vaccines: uint,
+    allocated-vaccines: uint,
+    created-at: uint,
+    expiry-threshold: uint
+  }
+)
+
+(define-map vaccine-donations
+  { vaccine-id: uint }
+  {
+    pool-id: uint,
+    donor: principal,
+    donated-at: uint,
+    allocated-to: (optional principal),
+    claimed: bool
+  }
+)
+
+(define-public (donate-vaccine-to-pool (vaccine-id uint) (target-region (string-ascii 100)))
+  (let
+    (
+      (pool-id (var-get next-donation-id))
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+    )
+    (asserts! (is-some vaccine-data) ERR_VACCINE_NOT_FOUND)
+    (let ((vaccine (unwrap-panic vaccine-data)))
+      (asserts! (is-eq (get status vaccine) "produced") ERR_INVALID_STATUS)
+      (asserts! (is-eq (get cold-chain-violations vaccine) u0) ERR_INVALID_TEMPERATURE)
+      (map-set donation-pools
+        { pool-id: pool-id }
+        { donor: tx-sender, target-region: target-region, available-vaccines: u1, 
+          allocated-vaccines: u0, created-at: stacks-block-height, expiry-threshold: (get expiry-date vaccine) })
+      (map-set vaccine-donations { vaccine-id: vaccine-id }
+        { pool-id: pool-id, donor: tx-sender, donated-at: stacks-block-height, 
+          allocated-to: none, claimed: false })
+      (map-set vaccines { vaccine-id: vaccine-id }
+        (merge vaccine { status: "donated" }))
+      (var-set next-donation-id (+ pool-id u1))
+      (ok pool-id)
+    )
+  )
+)
+
+(define-public (claim-donated-vaccine (vaccine-id uint) (patient principal))
+  (let
+    (
+      (donation-data (map-get? vaccine-donations { vaccine-id: vaccine-id }))
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+      (facility-perms (map-get? facility-permissions { facility: tx-sender }))
+    )
+    (asserts! (is-some donation-data) ERR_DONATION_NOT_FOUND)
+    (asserts! (is-some vaccine-data) ERR_VACCINE_NOT_FOUND)
+    (asserts! (is-some facility-perms) ERR_FACILITY_NOT_AUTHORIZED)
+    (asserts! (get can-administer (unwrap-panic facility-perms)) ERR_UNAUTHORIZED)
+    (let ((donation (unwrap-panic donation-data)) (vaccine (unwrap-panic vaccine-data)))
+      (asserts! (not (get claimed donation)) ERR_VACCINE_ALREADY_USED)
+      (asserts! (is-eq (get status vaccine) "donated") ERR_INVALID_STATUS)
+      (map-set vaccine-donations { vaccine-id: vaccine-id }
+        (merge donation { allocated-to: (some patient), claimed: true }))
+      (map-set vaccines { vaccine-id: vaccine-id }
+        (merge vaccine { status: "administered", administered-to: (some patient), 
+                         administered-date: (some stacks-block-height) }))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-donation-pool (pool-id uint))
+  (map-get? donation-pools { pool-id: pool-id })
+)
+
+(define-read-only (get-vaccine-donation-status (vaccine-id uint))
+  (map-get? vaccine-donations { vaccine-id: vaccine-id })
 )
