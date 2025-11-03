@@ -14,6 +14,13 @@
 (define-constant ERR_INSUFFICIENT_DONATED_VACCINES (err u115))
 (define-constant ERR_NOT_ELIGIBLE_FOR_DONATION (err u116))
 
+(define-constant ERR_BOUNTY_NOT_FOUND (err u117))
+(define-constant ERR_INSUFFICIENT_STAKE (err u118))
+(define-constant ERR_ALREADY_CLAIMED (err u119))
+(define-constant ERR_NOT_INSPECTOR (err u120))
+
+(define-data-var next-bounty-id uint u1)
+
 (define-data-var next-donation-id uint u1)
 
 (define-data-var next-recall-id uint u1)
@@ -689,4 +696,96 @@
 
 (define-read-only (get-vaccine-donation-status (vaccine-id uint))
   (map-get? vaccine-donations { vaccine-id: vaccine-id })
+)
+
+(define-map quality-bounties
+  { bounty-id: uint }
+  {
+    vaccine-id: uint,
+    inspector: principal,
+    issue-type: (string-ascii 50),
+    severity-score: uint,
+    findings: (string-ascii 200),
+    reported-at: uint,
+    verified: bool,
+    reward-amount: uint,
+    claimed: bool
+  }
+)
+
+(define-map inspector-registry
+  { inspector: principal }
+  { certified: bool, total-reports: uint, verified-reports: uint, reputation-score: uint }
+)
+
+(define-map facility-stakes
+  { facility: principal }
+  { staked-amount: uint, claims-against: uint, last-claim-date: uint }
+)
+
+(define-public (register-as-inspector)
+  (let ((existing (map-get? inspector-registry { inspector: tx-sender })))
+    (if (is-some existing)
+      (ok false)
+      (begin
+        (map-set inspector-registry { inspector: tx-sender }
+          { certified: true, total-reports: u0, verified-reports: u0, reputation-score: u100 })
+        (ok true)
+      )
+    )
+  )
+)
+
+(define-public (submit-quality-report (vaccine-id uint) (issue-type (string-ascii 50)) (severity-score uint) (findings (string-ascii 200)))
+  (let
+    (
+      (bounty-id (var-get next-bounty-id))
+      (vaccine-data (map-get? vaccines { vaccine-id: vaccine-id }))
+      (inspector-data (map-get? inspector-registry { inspector: tx-sender }))
+    )
+    (asserts! (is-some vaccine-data) ERR_VACCINE_NOT_FOUND)
+    (asserts! (is-some inspector-data) ERR_NOT_INSPECTOR)
+    (let ((reward (calculate-bounty-reward severity-score)))
+      (map-set quality-bounties { bounty-id: bounty-id }
+        { vaccine-id: vaccine-id, inspector: tx-sender, issue-type: issue-type,
+          severity-score: severity-score, findings: findings, reported-at: stacks-block-height,
+          verified: false, reward-amount: reward, claimed: false })
+      (map-set inspector-registry { inspector: tx-sender }
+        (merge (unwrap-panic inspector-data) { total-reports: (+ (get total-reports (unwrap-panic inspector-data)) u1) }))
+      (var-set next-bounty-id (+ bounty-id u1))
+      (ok bounty-id)
+    )
+  )
+)
+
+(define-public (verify-bounty-claim (bounty-id uint) (approved bool))
+  (let ((bounty-data (map-get? quality-bounties { bounty-id: bounty-id })))
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (is-some bounty-data) ERR_BOUNTY_NOT_FOUND)
+    (let ((bounty (unwrap-panic bounty-data)))
+      (map-set quality-bounties { bounty-id: bounty-id } (merge bounty { verified: approved }))
+      (if approved
+        (let ((inspector-data (unwrap-panic (map-get? inspector-registry { inspector: (get inspector bounty) }))))
+          (map-set inspector-registry { inspector: (get inspector bounty) }
+            (merge inspector-data { verified-reports: (+ (get verified-reports inspector-data) u1),
+                                   reputation-score: (+ (get reputation-score inspector-data) u10) }))
+        )
+        true
+      )
+      (ok approved)
+    )
+  )
+)
+
+(define-read-only (get-quality-bounty (bounty-id uint))
+  (map-get? quality-bounties { bounty-id: bounty-id })
+)
+
+(define-read-only (get-inspector-profile (inspector principal))
+  (map-get? inspector-registry { inspector: inspector })
+)
+
+(define-private (calculate-bounty-reward (severity uint))
+  (if (>= severity u8) u1000
+    (if (>= severity u5) u500 u250))
 )
